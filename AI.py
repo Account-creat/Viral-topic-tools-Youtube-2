@@ -1,9 +1,10 @@
 import streamlit as st
 import requests
+import time  # Added for retry mechanism
 from datetime import datetime, timedelta
 
-# YouTube API Key (Store in Streamlit Secrets for security)
-API_KEY = st.secrets["YOUTUBE_API_KEY"]  # Store it in .streamlit/secrets.toml
+# Use Streamlit secrets for security
+API_KEY = st.secrets["YOUTUBE_API_KEY"]
 YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 YOUTUBE_VIDEO_URL = "https://www.googleapis.com/youtube/v3/videos"
 YOUTUBE_CHANNEL_URL = "https://www.googleapis.com/youtube/v3/channels"
@@ -14,7 +15,7 @@ st.title("YouTube Viral Topics Tool")
 # Input Fields
 days = st.number_input("Enter Days to Search (1-30):", min_value=1, max_value=30, value=5)
 
-# List of broader keywords
+# Keywords
 keywords = [
     "Affair Relationship Stories", "Reddit Update", "Reddit Relationship Advice", "Reddit Relationship",
     "Reddit Cheating", "AITA Update", "Open Marriage", "Open Relationship", "X BF Caught",
@@ -25,18 +26,35 @@ keywords = [
     "Cheat Exposed"
 ]
 
+# Debugging Log
+def debug_log(message):
+    st.text(f"DEBUG: {message}")
+
+# API request function with error handling
+def fetch_api(url, params):
+    for _ in range(3):  # Retry 3 times
+        response = requests.get(url, params=params)
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 403:
+            st.error("API quota exceeded or access forbidden.")
+            return None
+        else:
+            debug_log(f"API error {response.status_code}: {response.text}")
+            time.sleep(2)  # Wait and retry
+    return None
+
 # Fetch Data Button
 if st.button("Fetch Data"):
     try:
-        # Calculate date range
+        # Date range for search
         start_date = (datetime.utcnow() - timedelta(days=int(days))).isoformat("T") + "Z"
         all_results = []
 
-        # Iterate over the list of keywords
+        # Iterate over keywords
         for keyword in keywords:
-            st.write(f"Searching for keyword: {keyword}")
+            debug_log(f"Searching for keyword: {keyword}")
 
-            # Define search parameters
             search_params = {
                 "part": "snippet",
                 "q": keyword,
@@ -47,59 +65,38 @@ if st.button("Fetch Data"):
                 "key": API_KEY,
             }
 
-            # Fetch video data
-            response = requests.get(YOUTUBE_SEARCH_URL, params=search_params)
-            if response.status_code != 200:
-                st.error(f"API error: {response.status_code} - {response.text}")
-                continue
-            data = response.json()
-
-            # Check if "items" key exists
-            if "items" not in data or not data["items"]:
+            data = fetch_api(YOUTUBE_SEARCH_URL, search_params)
+            if not data or "items" not in data:
                 st.warning(f"No videos found for keyword: {keyword}")
                 continue
 
             videos = data["items"]
-            video_ids = [video["id"].get("videoId", None) for video in videos if "id" in video]
-            channel_ids = [video["snippet"].get("channelId", None) for video in videos if "snippet" in video]
+            video_ids = [video["id"].get("videoId") for video in videos if "id" in video]
+            channel_ids = [video["snippet"].get("channelId") for video in videos if "snippet" in video]
 
-            # Remove None values
-            video_ids = [vid for vid in video_ids if vid]
+            video_ids = [vid for vid in video_ids if vid]  # Remove None values
             channel_ids = [cid for cid in channel_ids if cid]
 
             if not video_ids or not channel_ids:
-                st.warning(f"Skipping keyword: {keyword} due to missing video/channel data.")
+                st.warning(f"Skipping keyword: {keyword} due to missing data.")
                 continue
 
-            # Fetch video statistics
+            # Fetch video stats
             stats_params = {"part": "statistics", "id": ",".join(video_ids), "key": API_KEY}
-            stats_response = requests.get(YOUTUBE_VIDEO_URL, params=stats_params)
-            if stats_response.status_code != 200:
-                st.error(f"Video stats API error: {stats_response.status_code} - {stats_response.text}")
-                continue
-            stats_data = stats_response.json()
-
-            if "items" not in stats_data or not stats_data["items"]:
+            stats_data = fetch_api(YOUTUBE_VIDEO_URL, stats_params)
+            if not stats_data or "items" not in stats_data:
                 st.warning(f"Failed to fetch video statistics for keyword: {keyword}")
                 continue
 
-            # Fetch channel statistics
+            # Fetch channel stats
             channel_params = {"part": "statistics", "id": ",".join(channel_ids), "key": API_KEY}
-            channel_response = requests.get(YOUTUBE_CHANNEL_URL, params=channel_params)
-            if channel_response.status_code != 200:
-                st.error(f"Channel stats API error: {channel_response.status_code} - {channel_response.text}")
-                continue
-            channel_data = channel_response.json()
-
-            if "items" not in channel_data or not channel_data["items"]:
+            channel_data = fetch_api(YOUTUBE_CHANNEL_URL, channel_params)
+            if not channel_data or "items" not in channel_data:
                 st.warning(f"Failed to fetch channel statistics for keyword: {keyword}")
                 continue
 
-            stats = stats_data["items"]
-            channels = channel_data["items"]
-
-            # Collect results
-            for video, stat, channel in zip(videos, stats, channels):
+            # Collect and store results
+            for video, stat, channel in zip(videos, stats_data["items"], channel_data["items"]):
                 title = video["snippet"].get("title", "N/A")
                 description = video["snippet"].get("description", "")[:200]
                 video_id = video["id"].get("videoId", "N/A")
@@ -107,7 +104,7 @@ if st.button("Fetch Data"):
                 views = int(stat["statistics"].get("viewCount", 0))
                 subs = int(channel["statistics"].get("subscriberCount", 0))
 
-                if subs < 3000:  # Only include channels with fewer than 3,000 subscribers
+                if subs < 3000:  # Only include small channels
                     all_results.append({
                         "Title": title,
                         "Description": description,
@@ -118,7 +115,7 @@ if st.button("Fetch Data"):
 
         # Display results
         if all_results:
-            st.success(f"Found {len(all_results)} results across all keywords!")
+            st.success(f"Found {len(all_results)} results!")
             for result in all_results:
                 st.markdown(
                     f"**Title:** {result['Title']}  \n"
@@ -129,7 +126,7 @@ if st.button("Fetch Data"):
                 )
                 st.write("---")
         else:
-            st.warning("No results found for channels with fewer than 3,000 subscribers.")
+            st.warning("No results found for small channels.")
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
